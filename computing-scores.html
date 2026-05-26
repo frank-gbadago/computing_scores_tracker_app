@@ -779,6 +779,7 @@ let currentYear = null;
 let currentTerm = null;
 let currentPage = 'page-students';
 let toastTimer = null;
+let pendingImport = null;
 
 function save() {
   if (currentYear) db.currentYear = currentYear;
@@ -1526,6 +1527,47 @@ function renderReport() {
 }
 
 // ══════════════════════════════════════════
+//  IMPORT CONFIRM / CANCEL
+// ══════════════════════════════════════════
+function confirmImport() {
+  if (!pendingImport) return;
+  try {
+    db = pendingImport.data;
+    currentYear = db.currentYear;
+    currentTerm = db.currentTerm;
+
+    // Ensure all classes exist for every year in imported data
+    db.years.forEach(function(yr) {
+      if (!db.students[yr]) db.students[yr] = {};
+      CLASSES.forEach(function(c) { if (!db.students[yr][c]) db.students[yr][c] = []; });
+      if (!db.scores[yr]) db.scores[yr] = {};
+      ['1','2','3'].forEach(function(t) { if (!db.scores[yr][t]) db.scores[yr][t] = {}; });
+    });
+
+    save();
+    initContextSelectors();
+    document.getElementById('select-term').value = currentTerm;
+    initClassGrid();
+    initReportClassGrid();
+    if (typeof activeClass !== 'undefined' && activeClass) renderStudentList();
+    renderRecent();
+    renderReport();
+
+    document.getElementById('modal-import-confirm').classList.add('hidden');
+    pendingImport = null;
+    toast('Import successful! ' + db.years.length + ' year(s) loaded.', 'success');
+  } catch(err) {
+    toast('Import failed: ' + err.message, 'error');
+  }
+}
+
+function cancelImport() {
+  pendingImport = null;
+  document.getElementById('modal-import-confirm').classList.add('hidden');
+  toast('Import cancelled', 'error');
+}
+
+// ══════════════════════════════════════════
 //  TOAST
 // ══════════════════════════════════════════
 function toast(msg, type = 'success') {
@@ -1582,68 +1624,91 @@ function importData() {
   document.getElementById('import-file-input').click();
 }
 
-// Handle the selected file
+// Handle the selected file — direct import, no modal
 function handleImportFile(event) {
   const file = event.target.files[0];
   if (!file) return;
-  
-  // Validate file type
+
   if (!file.name.endsWith('.json')) {
     toast('Please select a .json file', 'error');
-    event.target.value = ''; // Reset input
+    event.target.value = '';
     return;
   }
-  
+
   const reader = new FileReader();
-  
+
   reader.onload = function(e) {
     try {
       const imported = JSON.parse(e.target.result);
-      
-      // Validate the imported data structure
-      if (!imported.data || !imported.data.years || !imported.data.students || !imported.data.scores) {
-        toast('Invalid backup file format', 'error');
+
+      // Accept both wrapped { data: {...} } and raw db formats
+      let dataToImport = null;
+      if (imported.data && imported.data.students) {
+        dataToImport = imported.data;
+      } else if (imported.students) {
+        dataToImport = imported;
+      } else {
+        toast('Not a valid Computing Scores backup file', 'error');
+        event.target.value = '';
         return;
       }
-      
-      // Confirm before overwriting
-      const confirmMsg = `This will REPLACE all current data with the backup from ${new Date(imported.exportedAt).toLocaleString()}.\n\nStudents and scores currently in this browser will be lost.\n\nContinue?`;
-      
-      if (!confirm(confirmMsg)) {
-        toast('Import cancelled', 'error');
-        event.target.value = ''; // Reset input
-        return;
-      }
-      
-      // Import the data
-      db = imported.data;
+
+      // Fill in any missing fields with safe defaults
+      if (!dataToImport.years) dataToImport.years = [getDefaultYear()];
+      if (!dataToImport.currentYear) dataToImport.currentYear = dataToImport.years[0];
+      if (!dataToImport.currentTerm) dataToImport.currentTerm = '1';
+      if (!dataToImport.scores) dataToImport.scores = {};
+
+      // Ensure all class arrays exist for every year
+      dataToImport.years.forEach(function(yr) {
+        if (!dataToImport.students[yr]) dataToImport.students[yr] = {};
+        CLASSES.forEach(function(c) {
+          if (!dataToImport.students[yr][c]) dataToImport.students[yr][c] = [];
+        });
+        if (!dataToImport.scores[yr]) dataToImport.scores[yr] = {};
+        ['1','2','3'].forEach(function(t) {
+          if (!dataToImport.scores[yr][t]) dataToImport.scores[yr][t] = {};
+        });
+      });
+
+      // Count students
+      let studentCount = 0;
+      dataToImport.years.forEach(function(yr) {
+        CLASSES.forEach(function(c) {
+          studentCount += (dataToImport.students[yr][c] || []).length;
+        });
+      });
+
+      // Apply to app
+      db = dataToImport;
       currentYear = db.currentYear;
       currentTerm = db.currentTerm;
-      
-      // Save to localStorage
-      save();
-      
-      // Refresh the UI
-      populateYearSelector();
+      localStorage.setItem('computing_scores_v2', JSON.stringify(db));
+
+      // Refresh all UI
+      initContextSelectors();
       document.getElementById('select-term').value = currentTerm;
-      renderClassGrid();
+      activeClass = null;
+      initClassGrid();
+      initReportClassGrid();
       renderStudentList();
-      renderRecentEntries();
-      renderReports();
-      
-      toast(`Data imported successfully! ${db.years.length} year(s) loaded.`, 'success');
+      renderRecent();
+      renderReport();
+
+      toast('Imported ' + studentCount + ' students successfully!', 'success');
+
     } catch (err) {
-      toast('Import failed: ' + err.message, 'error');
+      toast('Import error: ' + err.message, 'error');
     }
-    
-    event.target.value = ''; // Reset input for future imports
-  };
-  
-  reader.onerror = function() {
-    toast('Failed to read file', 'error');
+
     event.target.value = '';
   };
-  
+
+  reader.onerror = function() {
+    toast('Could not read the file', 'error');
+    event.target.value = '';
+  };
+
   reader.readAsText(file);
 }
 
@@ -1654,9 +1719,9 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.autocomplete-wrap')) {
     document.getElementById('ac-list').style.display = 'none';
   }
-  // Close modals on overlay click
-  if (e.target.classList.contains('modal-overlay')) {
-    e.target.classList.add('hidden');
+  // Close modals only when clicking the dark backdrop directly (not buttons inside)
+  if (e.target.classList.contains('modal-overlay') && e.target.id === 'modal-import-confirm') {
+    // Don't auto-close import confirm — user must click Yes or Cancel
   }
 });
 
